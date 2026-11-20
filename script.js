@@ -1,3 +1,4 @@
+// STEP 30: 試合ごとにIndexedDBへ一時保存。更新終了で一括クラウド公開。
 // STEP 22: Supabaseクラウド保存・管理者認証。
 // STEP 17: 閲覧者の案内欄を非表示・試合区分を追加・全条件の一括解除。
 // STEP 16: 管理者・閲覧者のローカル分離と更新終了（IndexedDB）。外部公開・認証は未実装。
@@ -7,6 +8,8 @@
 const $ = id => document.getElementById(id);
 const adminMode = new URLSearchParams(location.search).get('admin') === '1';
 let dirty = false, busy = 0, publishing = false, ready = false;
+let leagueDraftPending=()=>false;
+let resumeMatch='';
 const uploadStatuses = new Map();
 function markDirty(){dirty=true;updatePublishUI();}
 
@@ -227,19 +230,23 @@ for(const category of Object.keys(labels)) {
     const input=document.createElement('input');input.type='file';input.accept='.csv,text/csv';input.style.cssText='display:block;width:100%;font-size:11px;margin:6px 0;';label.append(input);panel.append(label);
     const status=document.createElement('p');status.textContent='未読み込み';status.setAttribute('aria-live','polite');status.style.cssText='color:#64748b;overflow-wrap:anywhere;';panel.append(status);uploadStatuses.set(category,status);
     input.addEventListener('change',async()=>{
-        const file=input.files[0];if(!file||!ready||publishing)return;
-        status.textContent='読み込み中…';input.disabled=true;busy++;updatePublishUI();
+        const file=input.files[0];if(!file||!ready||publishing||busy){input.value='';return;}
+        if(leagueDraftPending()){alert('先にリーグ戦の入力を一時保存してください。');input.value='';return;}
+        const oldRows=dataByCategory[category],oldAnchors=new Map(leagueAnchors),oldDirty=dirty;
+        status.textContent='読み込み中…';input.disabled=true;busy++;const leagueBox=panel.nextElementSibling;if(leagueBox)leagueBox.inert=true;updatePublishUI();
         try {
             const records=normalizeCSV(await file.text(),category);
             const remap=category==='league'?remapLeagueAnchors(dataByCategory.league,records):null;
             dataByCategory[category]=records;
-            if(remap){leagueAnchors.clear();for(const [k,v] of remap.entries)leagueAnchors.set(k,v);refreshLeaguePanel();}
+            if(remap){leagueAnchors.clear();for(const [k,v] of remap.entries)leagueAnchors.set(k,v);}
+            await persistDraft();
+            if(remap)refreshLeaguePanel();
             markDirty();
             status.textContent=`${records.length.toLocaleString('ja-JP')}件 読み込み完了`+(category==='sheet'?'（所属未確認）':'')+(remap?`｜リーグ戦基準点：${remap.kept}件引継ぎ、${remap.dropped}件要再登録`:'');
             status.style.color='#17633a';
             populateFilters();search();
-        } catch(e) {status.textContent='読み込み失敗：'+e.message+'（前回のデータは保持）';status.style.color='#b42318';}
-        finally {input.disabled=false;input.value='';busy--;updatePublishUI();}
+        } catch(e) {dataByCategory[category]=oldRows;leagueAnchors.clear();for(const [k,v] of oldAnchors)leagueAnchors.set(k,v);dirty=oldDirty;status.textContent='読み込み失敗：'+e.message+'（以前のデータは保持）';status.style.color='#b42318';}
+        finally {input.disabled=false;input.value='';busy--;if(leagueBox)leagueBox.inert=false;updatePublishUI();}
     });
 }
 if(adminMode)form.before(panel);
@@ -448,46 +455,137 @@ function leagueAngle(r,angle) {
     // 3秒の早出し。撮影再開地点は別動画の先頭より前にしない。
     return {id:a.id,start:Math.max(0,nominal-3),nominal};
 }
+// STEP 30: 2アングルを試合単位で登録し、ローカル下書きに保存。
+const leagueRegistrationAngles=['ネット裏','センター裏'];
+function planLeagueAngle(gameRows, angle, input) {
+    const url=clean(input.url), raw=clean(input.raw), corrected=clean(input.corrected);
+    if(!url&&!raw&&!corrected)return [];
+    const name=angleLabel(angle);
+    if(!url||!raw||!corrected)throw new Error(name+'：3項目を入力してください（登録しない場合は3項目とも空欄）。');
+    const video=parseYouTube({url,seconds:'0'});
+    if(!video)throw new Error(name+'：正しいYouTube URLを入力してください。');
+    const original=chapterLines(raw);
+    const first=new Map();for(const r of gameRows)if(r.inning&&!first.has(r.inning))first.set(r.inning,r);
+    const innings=[...original.found.keys()].filter(i=>first.has(i));
+    if(!innings.length)throw new Error(name+'：元チャプターに慶應攻撃回がありません。例：05:00 1回表');
+    const lines=corrected.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+    const timesOnly=lines.every(x=>/^\d+(?::\d{1,2}){1,2}$/.test(x)&&parseTime(x)!==null);
+    if(timesOnly&&lines.length!==innings.length)throw new Error(name+'：時刻だけの場合は慶應の攻撃回 '+innings.length+' 行分を元チャプター順で入力してください。');
+    const fixed=timesOnly?{found:new Map(innings.map((i,j)=>[i,parseTime(lines[j])])),ignored:[]}:chapterLines(corrected);
+    if(fixed.ignored.length||!fixed.found.size)throw new Error(name+'：修正時刻は「05:02 1回表」の形式で1行ずつ入力してください。');
+    const absent=innings.filter(i=>!fixed.found.has(i));
+    const extra=[...fixed.found.keys()].filter(i=>!original.found.has(i));
+    if(absent.length)throw new Error(name+'：修正時刻が不足しています：'+absent.join('、'));
+    if(extra.length)throw new Error(name+'：元チャプターにない修正行：'+extra.join('、'));
+    const planned=[];
+    for(const inning of innings){
+        const r=first.get(inning), start=fixed.found.get(inning);
+        if(clockSeconds(r.timestamp)===null)throw new Error(name+'：'+inning+' のCSV時刻が不正です。');
+        planned.push({r,angle,anchor:{id:video.id,start,originalStart:original.found.get(inning),originalChapterText:raw,registrationUrl:url}});
+    }
+    return planned;
+}
 function setupLeaguePanel() {
     const box=document.createElement('details');box.style.cssText=panel.style.cssText;
-    const summary=document.createElement('summary');summary.textContent='リーグ戦 動画登録（管理者用）';summary.style.cssText='font-weight:bold;cursor:pointer;margin-bottom:8px';box.append(summary);
-    const p=t=>{const el=document.createElement('p');el.textContent=t;el.style.cssText='margin:8px 0;line-height:1.5;overflow-wrap:anywhere;';box.append(el);return el;};
-    p('リーグ戦CSVを読み込んでから登録。基準は投球動作の約2秒前。再生はさらに3秒前から。更新終了を押すと登録内容を保存します。CSV差し替え時は同一と確認できた基準点のみ引き継ぎます。');
-    function field(label,el) {const l=document.createElement('label');l.textContent=label;l.style.cssText='display:block;font-weight:bold;margin:10px 0 4px';el.style.cssText='display:block;width:100%;margin-top:4px;padding:5px;border:1px solid #b9c5d3;border-radius:4px;font-size:12px;';l.append(el);box.append(l);return el;}
-    const match=field('試合',document.createElement('select'));
-    const angle=field('撮影アングル',document.createElement('select'));angle.replaceChildren(...angleOrder.map(a=>new Option(angleLabel(a),a)));
-    const url=field('YouTube URL',document.createElement('input'));url.type='url';url.placeholder='https://youtu.be/...';
-    const text=field('イニング別チャプター',document.createElement('textarea'));text.rows=5;text.placeholder='05:00 1回表\n18:25 1回裏\n32:10 2回表';
-    const status=document.createElement('p');status.setAttribute('aria-live','polite');status.style.cssText='line-height:1.5;margin:8px 0;overflow-wrap:anywhere;';
-    function button(label,action) {const b=document.createElement('button');b.type='button';b.textContent=label;b.className='search-button';b.style.cssText='margin:6px 0;font-size:12px;padding:8px;';b.addEventListener('click',()=>{try{if(!ready||publishing)return;action();markDirty();status.style.color='#17633a';}catch(e){status.textContent=e.message;status.style.color='#b42318';}});box.append(b);return b;}
+    const summary=document.createElement('summary');summary.textContent='リーグ戦 動画登録（1試合ずつ）';summary.style.cssText='font-weight:bold;cursor:pointer;margin-bottom:8px';box.append(summary);
+    const p=(parent,t)=>{const el=document.createElement('p');el.textContent=t;el.style.cssText='margin:8px 0;line-height:1.5;overflow-wrap:anywhere;';parent.append(el);return el;};
+    p(box,'試合を選択し、各アングルの元チャプター・投球動作開始2秒前の修正時刻・YouTube URLを登録してください。再生は修正時刻のさらに3秒前から。片方の映像しかない場合はもう片方の3項目を空欄のままにしてください。各試合を一時保存した後、最後に更新管理欄の「更新終了」を押すとまとめて公開されます。');
+    function field(parent,label,el){const l=document.createElement('label');l.textContent=label;l.style.cssText='display:block;font-weight:bold;margin:10px 0 4px';el.style.cssText='display:block;width:100%;margin-top:4px;padding:6px;border:1px solid #b9c5d3;border-radius:4px;font-size:12px;box-sizing:border-box;';l.append(el);parent.append(l);return el;}
+    const match=field(box,'試合',document.createElement('select'));
+    const fields=new Map();let edited=false, currentMatch='';leagueDraftPending=()=>edited;
+    const progress=p(box,'');
+    for(const a of leagueRegistrationAngles){
+        const section=document.createElement('section');section.style.cssText='border-top:1px solid #cdd7e3;margin-top:14px;padding-top:10px;';box.append(section);
+        const title=document.createElement('h3');title.textContent=angleLabel(a);section.append(title);
+        const raw=field(section,'① チャプター（YouTubeからコピー）',document.createElement('textarea'));raw.rows=5;raw.placeholder='00:00 試合開始\n05:00 1回表\n18:25 1回裏';
+        const corrected=field(section,'② 投球動作開始の2秒前（動画内時刻）',document.createElement('textarea'));corrected.rows=5;corrected.placeholder='05:02 1回表\n18:27 1回裏';
+        const url=field(section,'③ YouTube URL',document.createElement('input'));url.type='url';url.placeholder='https://youtu.be/...';
+        const info=p(section,'');fields.set(a,{url,raw,corrected,info});
+        for(const el of [url,raw,corrected])el.addEventListener('input',()=>{edited=true;info.textContent='未保存の入力あり';updatePublishUI();});
+    }
+    const status=p(box,'試合を選択してください。');status.setAttribute('aria-live','polite');
+    const save=document.createElement('button');save.type='button';save.className='search-button';save.textContent='一時保存して次の試合へ';box.append(save);
+    const prev=document.createElement('button');prev.type='button';prev.className='reset-button';prev.textContent='前の試合へ';box.append(prev);
+    const skip=document.createElement('button');skip.type='button';skip.className='reset-button';skip.textContent='次の試合へ（変更なし）';box.append(skip);
+    function neighbor(delta){const opts=[...match.options].filter(o=>o.value);const i=opts.findIndex(o=>o.value===match.value);return opts[i+delta]?.value||'';}
+    function updateProgress(){const keys=new Set(dataByCategory.league.map(leagueMatchKey)), registered=new Set(dataByCategory.league.filter(r=>leagueRegistrationAngles.some(a=>leagueAngle(r,a))).map(leagueMatchKey));progress.textContent='再生位置登録済み（片方以上）：'+registered.size+' / '+keys.size+'試合｜未公開の一時保存は最後に更新終了';}
     const rows=()=>dataByCategory.league.filter(r=>leagueMatchKey(r)===match.value);
     const requireMatch=()=>{if(!rows().length)throw new Error('リーグ戦CSVと試合を選択してください。');};
-    const getId=()=>{const parsed=parseYouTube({url:url.value,seconds:'0'});if(!parsed)throw new Error('正しいYouTube URLを入力してください。');return parsed.id;};
-    const count=()=>rows().filter(r=>Object.keys(playableAngles(r)).length).length;
-    function refresh(message) {search();status.textContent=message+'｜この試合の再生位置登録済み：'+count()+' / '+rows().length+'件';updatePitches();}
-    button('チャプターを登録・更新',()=>{
-        requireMatch();const id=getId(), parsed=chapterLines(text.value), gameRows=rows();
-        const candidates=[...parsed.found].map(([inning,start])=>({r:gameRows.find(r=>r.inning===inning),start,inning}));
-        const use=candidates.filter(x=>x.r);
-        if(!use.length)throw new Error('慶應の攻撃イニングに一致するチャプターがありません。例：05:00 1回表');
-        for(const {r,start} of use)if(clockSeconds(r.timestamp)===null)throw new Error(r.inning+' の先頭行の時刻が不正です。');
-        for(const {r,start} of use)putAnchor(r,angle.value,{id,start});
-        refresh(use.length+'イニング登録。対象外・認識できない行：'+(candidates.length-use.length+parsed.ignored.length)+'行（慶應の守備回等）。');
+    const count=()=>rows().filter(r=>leagueRegistrationAngles.some(a=>leagueAngle(r,a))).length;
+    const say=(msg,error=false)=>{status.textContent=msg;status.style.color=error?'#b42318':'#17633a';};
+    const firstRows=()=>{const m=new Map();for(const r of rows())if(r.inning&&!m.has(r.inning))m.set(r.inning,r);return [...m.values()];};
+    function populateInputs(){
+        currentMatch=match.value;edited=false;url.value='';time.value='';inning.value='';pitch.value='';
+        for(const [a,f] of fields){
+            const entries=firstRows().map(r=>({r,anchor:(leagueAnchors.get(anchorSlot(r,a))||[]).find(x=>x.row===r.sourceRow&&!x.missing)})).filter(x=>x.anchor);
+            // 複数動画の既存登録は単一URL欄に誤って集約しない。
+            const ids=new Set(entries.map(x=>x.anchor.id));
+            f.url.value=ids.size===1?(entries[0].anchor.registrationUrl||'https://www.youtube.com/watch?v='+entries[0].anchor.id):'';
+            const fmt=(s)=>[Math.floor(s/3600),Math.floor(s/60)%60,s%60].map((v,i)=>i===0?String(v):String(v).padStart(2,'0')).join(':');
+            const canFill=ids.size===1;
+            f.raw.value=canFill?(entries.find(x=>x.anchor.originalChapterText)?.anchor.originalChapterText||entries.map(({r,anchor})=>fmt(anchor.originalStart??anchor.start)+' '+r.inning).join('\n')):'';
+            // 元テキストと異なるイニングが過去に追加された場合も補完。
+            if(canFill){const known=chapterLines(f.raw.value).found;for(const {r,anchor} of entries)if(!known.has(r.inning))f.raw.value+='\n'+fmt(anchor.originalStart??anchor.start)+' '+r.inning;}
+            f.corrected.value=canFill?entries.map(({r,anchor})=>fmt(anchor.start)+' '+r.inning).join('\n'):'';
+            f.initial=JSON.stringify([f.url.value,f.raw.value,f.corrected.value]);
+            f.info.textContent=ids.size>1?'複数動画の既存登録あり。空欄のままなら維持します。途中補正から編集可能。':entries.length?entries.length+'イニング登録済み'+(entries.some(x=>x.anchor.originalStart===undefined)?'（旧登録は元チャプターの代わりに保存時刻を表示）':''):'未登録';
+        }
+        save.disabled=!match.value;prev.disabled=!neighbor(-1);skip.disabled=!neighbor(1);
+        updateInnings();updateProgress();
+    }
+    function updateMatches(preferred=match.value){
+        const previous=preferred;const m=new Map(dataByCategory.league.map(r=>[leagueMatchKey(r),r.date+' vs '+r.opponent]));
+        match.replaceChildren(new Option('選択してください',''),...[...m].sort((x,y)=>x[1].localeCompare(y[1])).map(([k,label])=>new Option(label,k)));
+        if(m.has(previous))match.value=previous;
+        populateInputs();say(match.value?'この試合の再生位置登録済み：'+count()+' / '+rows().length+'件':'試合を選択してください。');
+    }
+    match.addEventListener('change',()=>{
+        if(busy||publishing){match.value=currentMatch;return;}
+        if(edited&&!confirm('未保存の6項目を破棄して別の試合を選択しますか？')){match.value=currentMatch;return;}
+        populateInputs();updatePublishUI();say('この試合の再生位置登録済み：'+count()+' / '+rows().length+'件');
     });
-    p('途中補正・撮影中断：該当イニングと投球を選び、再開地点の動画内時刻を登録。映像がない最初の投球には「動画なし」を登録し、再開した最初の投球に新しい基準を登録します。');
-    const inning=field('イニング',document.createElement('select'));
-    const pitch=field('基準にする投球（CSV順）',document.createElement('select'));
-    const time=field('動画内の時刻（秒または hh:mm:ss）',document.createElement('input'));time.placeholder='1:23:45';
+    function move(delta){if(!ready||busy||publishing)return;const target=neighbor(delta);if(!target)return;if(edited&&!confirm('未保存の6項目を破棄して移動しますか？'))return;match.value=target;populateInputs();updatePublishUI();say('この試合の再生位置登録済み：'+count()+' / '+rows().length+'件');}
+    prev.addEventListener('click',()=>move(-1));skip.addEventListener('click',()=>move(1));
+    save.addEventListener('click',async()=>{
+        if(!ready||!session||publishing||busy)return;
+        try{
+            requireMatch();
+            const plan=[...fields].flatMap(([a,f])=>JSON.stringify([f.url.value,f.raw.value,f.corrected.value])===f.initial?[]:planLeagueAngle(rows(),a,{url:f.url.value,raw:f.raw.value,corrected:f.corrected.value}));
+            if(!plan.length)throw new Error('保存する変更がありません。少なくとも片方のアングルの3項目を入力・変更してください。');
+            const label=match.selectedOptions[0].textContent;
+            const before=new Map(leagueAnchors),oldDirty=dirty,oldResume=resumeMatch;
+            const next=neighbor(1);
+            busy++;box.inert=true;updatePublishUI();
+            try{
+                for(const {r,angle,anchor} of plan)putAnchor(r,angle,anchor);
+                resumeMatch=next||match.value;
+                await persistDraft();
+            }catch(e){leagueAnchors.clear();for(const [k,v] of before)leagueAnchors.set(k,v);dirty=oldDirty;resumeMatch=oldResume;say('一時保存失敗：'+e.message+'。入力は保持しています。',true);return;}
+            finally{busy--;box.inert=false;updatePublishUI();}
+            markDirty();const savedCount=count(),total=rows().length;
+            if(next)match.value=next;
+            populateInputs();search();updatePublishUI();
+            say(`${label}：一時保存完了（再生位置 ${savedCount} / ${total}件）。`+(next?' 次の試合を入力できます。':' 最後の試合です。更新終了で公開してください。'));
+        }catch(e){say(e.message,true);}
+    });
+    // 例外対応は折りたたみ内に残す。通常登録は上の6入力のみ。
+    const advanced=document.createElement('details');advanced.style.cssText='margin-top:16px;border-top:1px solid #cdd7e3;padding-top:10px;';box.append(advanced);
+    const as=document.createElement('summary');as.textContent='途中補正・撮影中断（必要な場合のみ）';advanced.append(as);
+    p(advanced,'上の6項目に未保存入力がある場合は先に試合を保存してください。中断した最初の投球に「動画なし」、再開した最初の投球に新しい基準時刻を登録。補正も一時保存され、下の更新終了でまとめて公開します。');
+    const angle=field(advanced,'撮影アングル',document.createElement('select'));angle.replaceChildren(...leagueRegistrationAngles.map(a=>new Option(angleLabel(a),a)));
+    const url=field(advanced,'再開動画のYouTube URL（空欄なら上のURL）',document.createElement('input'));url.type='url';
+    const inning=field(advanced,'イニング',document.createElement('select'));
+    const pitch=field(advanced,'基準にする投球（CSV順）',document.createElement('select'));
+    const time=field(advanced,'動画内の時刻（投球動作の2秒前）',document.createElement('input'));time.placeholder='1:23:45';
     function updatePitches(){const previous=pitch.value;const a=rows().filter(r=>r.inning===inning.value);pitch.replaceChildren(new Option('選択してください',''),...a.map((r,i)=>{const item=(leagueAnchors.get(anchorSlot(r,angle.value))||[]).find(x=>x.row===r.sourceRow);return new Option((i+1)+'球目｜'+r.timestamp.slice(-8)+'｜'+r.batter+'｜打席内'+r.pitchInAtBat+'球'+(item?item.missing?'【動画なし】':'【基準登録済】':''),String(r.sourceRow));}));if([...pitch.options].some(o=>o.value===previous))pitch.value=previous;}
     function updateInnings(){const previous=inning.value;inning.replaceChildren(new Option('選択してください',''),...[...new Set(rows().map(r=>r.inning).filter(Boolean))].map(i=>new Option(i,i)));if([...inning.options].some(o=>o.value===previous))inning.value=previous;updatePitches();}
-    function updateMatches(){const previous=match.value;const m=new Map(dataByCategory.league.map(r=>[leagueMatchKey(r),r.date+' vs '+r.opponent]));match.replaceChildren(new Option('選択してください',''),...[...m].map(([k,label])=>new Option(label,k)));if(m.has(previous))match.value=previous;updateInnings();status.textContent='試合を選択して登録してください。';}
-    match.addEventListener('change',()=>{updateInnings();status.textContent='この試合の再生位置登録済み：'+count()+' / '+rows().length+'件';});
-    inning.addEventListener('change',updatePitches);angle.addEventListener('change',updatePitches);
+    function button(label,action){const b=document.createElement('button');b.type='button';b.textContent=label;b.className='search-button';b.style.cssText='margin:6px 0;font-size:12px;padding:8px;';b.addEventListener('click',async()=>{if(!ready||publishing||busy)return;if(edited){say('先に上の6項目を一時保存してください。',true);return;}const before=new Map(leagueAnchors),oldDirty=dirty,oldResume=resumeMatch;busy++;box.inert=true;updatePublishUI();try{action();resumeMatch=match.value;await persistDraft();markDirty();search();populateInputs();say('途中補正を一時保存しました。下の「更新終了」で公開してください。');}catch(e){leagueAnchors.clear();for(const [k,v] of before)leagueAnchors.set(k,v);dirty=oldDirty;resumeMatch=oldResume;say(e.message,true);}finally{busy--;box.inert=false;updatePublishUI();}});advanced.append(b);}
     const chosen=()=>{requireMatch();const r=rows().find(r=>r.inning===inning.value&&String(r.sourceRow)===pitch.value);if(!r)throw new Error('基準にする投球を選択してください。');return r;};
-    button('この投球から再同期',()=>{const r=chosen(),id=getId(),start=parseTime(time.value);if(start===null||clockSeconds(r.timestamp)===null)throw new Error('動画内時刻またはCSV時刻が不正です。');putAnchor(r,angle.value,{id,start});refresh('補正点を登録しました。');});
-    button('この投球から動画なし',()=>{putAnchor(chosen(),angle.value,{missing:true});refresh('中断点を登録しました。再開投球に補正点を登録してください。');});
-    button('選択した投球の基準・中断点を削除',()=>{const r=chosen(),key=anchorSlot(r,angle.value);leagueAnchors.set(key,(leagueAnchors.get(key)||[]).filter(a=>a.row!==r.sourceRow));refresh('指定した登録を削除しました。前の基準が再適用される場合があります。');});
-    box.append(status);panel.after(box);updateMatches();return updateMatches;
+    inning.addEventListener('change',updatePitches);angle.addEventListener('change',updatePitches);
+    button('この投球から再同期',()=>{const r=chosen(),v=parseYouTube({url:url.value||fields.get(angle.value).url.value,seconds:'0'}),start=parseTime(time.value);if(!v||start===null||clockSeconds(r.timestamp)===null)throw new Error('動画URL・動画内時刻・CSV時刻を確認してください。');putAnchor(r,angle.value,{id:v.id,start});});
+    button('この投球から動画なし',()=>putAnchor(chosen(),angle.value,{missing:true}));
+    button('選択した投球の基準・中断点を削除',()=>{const r=chosen(),key=anchorSlot(r,angle.value);leagueAnchors.set(key,(leagueAnchors.get(key)||[]).filter(a=>a.row!==r.sourceRow));});
+    panel.after(box);updateMatches();return updateMatches;
 }
 const refreshLeaguePanel=adminMode?setupLeaguePanel():()=>{};
 populateFilters();
@@ -524,8 +622,8 @@ function openStore(){return new Promise((resolve,reject)=>{
     request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
     request.onblocked=()=>reject(new Error('他のタブを閉じて再試行してください。'));
 });}
-async function readPublished(){const db=await openStore();try{return await new Promise((resolve,reject)=>{
-    const tx=db.transaction('snapshots','readonly'),req=tx.objectStore('snapshots').get('published');
+async function readPublished(key='published'){const db=await openStore();try{return await new Promise((resolve,reject)=>{
+    const tx=db.transaction('snapshots','readonly'),req=tx.objectStore('snapshots').get(key);
     req.onsuccess=()=>resolve(req.result||null);req.onerror=()=>reject(req.error);tx.onabort=()=>reject(tx.error);
 });}finally{db.close();}}
 async function savePublished(snapshot,key='published'){const db=await openStore();try{await new Promise((resolve,reject)=>{
@@ -537,6 +635,9 @@ const SUPABASE_URL = 'https://ftiuxochwailzqowhqvn.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ompcWMNKOLV69g4sXeN8uw_RcXdacBA';
 const ADMIN_UID = '3c040525-96d4-4e38-99cd-db83a17e2fa2';
 let session=null, sessionExpires=0, cloudVersion=null;
+// 下書きは認証情報を含まない。公開版と別のキーへ保存し、同じ公開版からのみ復元する。
+const draftKey='league-batch-draft-v1:'+SUPABASE_URL+':'+ADMIN_UID;
+async function persistDraft(){if(!session||!ready)throw new Error('管理者ログインが必要です。');await savePublished({schema:1,baseVersion:cloudVersion,nextMatch:resumeMatch,snapshot:{version:1,publishedAt:lastPublished,data:dataByCategory,anchors:[...leagueAnchors]}},draftKey);}
 const configured=()=>/^sb_publishable_[A-Za-z0-9_-]+$/.test(SUPABASE_PUBLISHABLE_KEY);
 async function request(path,{method='GET',body,token,prefer}={}) {
     if(!configured())throw new Error('script.js の Publishable key を設定してください。');
@@ -627,9 +728,9 @@ const localOnly=location.hostname==='localhost'||location.hostname==='127.0.0.1'
 const viewer=new URL(location.href);viewer.search='';viewer.hash='';const viewerURL=viewer.href;
 const publishBox=document.createElement('section');publishBox.style.cssText=panel.style.cssText;
 const heading=document.createElement('h3');heading.textContent='更新管理（クラウド）';publishBox.append(heading);
-const note=document.createElement('p');note.style.cssText='line-height:1.6;margin-bottom:8px';note.textContent='更新終了を押すまで編集内容は公開されません。';publishBox.append(note);
+const note=document.createElement('p');note.style.cssText='line-height:1.6;margin-bottom:8px';note.textContent='各試合の一時保存はこのブラウザ内だけに保存されます。CSV・動画登録・途中補正は最後に更新終了を押すと一括公開されます。';publishBox.append(note);
 const publishStatus=document.createElement('p');publishStatus.setAttribute('aria-live','polite');publishStatus.style.cssText='line-height:1.6;overflow-wrap:anywhere;margin:6px 0';publishBox.append(publishStatus);
-const publishButton=document.createElement('button');publishButton.type='button';publishButton.className='search-button';publishButton.textContent='更新終了';publishButton.disabled=true;
+const publishButton=document.createElement('button');publishButton.type='button';publishButton.className='search-button';publishButton.textContent='更新終了・一括保存';publishButton.disabled=true;
 const linkBox=document.createElement('div');linkBox.hidden=true;linkBox.style.cssText='margin-top:12px;overflow-wrap:anywhere;line-height:1.6';
 const link=document.createElement('a');link.href=viewerURL;link.target='_blank';link.rel='noopener';link.textContent=localOnly?'閲覧者ページを開く（ローカル確認用）':'閲覧者ページを開く';linkBox.append(link);
 const urlText=document.createElement('input');urlText.readOnly=true;urlText.value=viewerURL;urlText.style.cssText='width:100%;margin-top:8px;padding:6px;border:1px solid #b9c5d3;border-radius:4px';linkBox.append(urlText);
@@ -641,8 +742,8 @@ let lastPublished=null;
 const totalRows=()=>Object.values(dataByCategory).reduce((n,rows)=>n+rows.length,0);
 function updatePublishUI(){
     if(!adminMode)return;
-    publishButton.disabled=!session||!ready||busy>0||publishing||!dirty||totalRows()===0;
-    if(ready&&!publishing)publishStatus.textContent=`編集中：${totalRows().toLocaleString('ja-JP')}件｜${dirty?'未確定の変更あり':'変更なし'}${lastPublished?'｜最終確定：'+new Date(lastPublished).toLocaleString('ja-JP'):''}`;
+    publishButton.disabled=!session||!ready||busy>0||publishing||!dirty||leagueDraftPending()||totalRows()===0;
+    if(ready&&!publishing)publishStatus.textContent=`編集中：${totalRows().toLocaleString('ja-JP')}件｜${leagueDraftPending()?'6項目の未保存入力あり（先に一時保存）':dirty?'一時保存済み・未公開':'変更なし'}${lastPublished?'｜最終確定：'+new Date(lastPublished).toLocaleString('ja-JP'):''}`;
 }
 function applySnapshot(snapshot){
     if(snapshot&&snapshot.version!==1)throw new Error('保存データの形式が異なります。');
@@ -661,6 +762,23 @@ async function loadViewer(){
     try{const loaded=await readCloud();cloudVersion=loaded.version;applySnapshot(loaded.snapshot);ready=true;}
     catch(e){showLoadError('クラウド読み込み失敗：'+e.message+'。ページを開き直してください。');}
 }
+let logoutControl=null;
+async function commitPending(){
+    if(!session||!ready||busy||publishing||!dirty||leagueDraftPending()||!totalRows())return false;
+    publishing=true;publishButton.disabled=true;if(logoutControl)logoutControl.disabled=true;panel.inert=true;const leagueBox=panel.nextElementSibling;if(leagueBox)leagueBox.inert=true;publishStatus.textContent='保存中…';
+    try{
+        const snapshot={version:1,publishedAt:new Date().toISOString(),data:dataByCategory,anchors:[...leagueAnchors]};
+        await persistDraft();
+        await savePublished(snapshot,'migration-backup');
+        await publishCloud(snapshot);
+        try{await savePublished(snapshot);}catch{}
+        lastPublished=snapshot.publishedAt;dirty=false;linkBox.hidden=false;
+        let cleanupWarning='';try{await savePublished(null,draftKey);}catch{cleanupWarning='（公開成功・下書きの削除のみ失敗）';}
+        publishStatus.textContent=`クラウド更新完了：${totalRows().toLocaleString('ja-JP')}件`+cleanupWarning;
+        return true;
+    }catch(e){publishStatus.textContent='更新失敗または結果未確認：'+e.message+'。公開済みデータを確認して再試行してください。';return false;}
+    finally{publishing=false;panel.inert=false;if(leagueBox)leagueBox.inert=false;if(logoutControl)logoutControl.disabled=false;publishButton.disabled=!session||!ready||busy>0||!dirty||leagueDraftPending()||!totalRows();}
+}
 if(adminMode){
     const leaguePanel=panel.nextElementSibling;
     panel.hidden=true;if(leaguePanel)leaguePanel.hidden=true;publishBox.hidden=true;
@@ -671,8 +789,8 @@ if(adminMode){
     const loginButton=document.createElement('button');loginButton.type='submit';loginButton.className='search-button';loginButton.textContent='ログイン';login.append(loginButton);
     const loginStatus=document.createElement('p');loginStatus.setAttribute('role','status');loginStatus.style.cssText='margin-top:8px;overflow-wrap:anywhere';login.append(loginStatus);
     panel.before(login);form.before(publishBox);publishBox.append(publishButton,linkBox);
-    const logout=document.createElement('button');logout.type='button';logout.className='reset-button';logout.textContent='ログアウト';publishBox.append(logout);
-    logout.addEventListener('click',async()=>{if(publishing||busy)return;if(dirty&&!confirm('未確定の編集を破棄してログアウトしますか？'))return;try{await request('/auth/v1/logout?scope=local',{method:'POST',token:await adminToken()});}catch{}session=null;dirty=false;location.reload();});
+    const logout=document.createElement('button');logout.type='button';logout.className='reset-button';logout.textContent='ログアウト';publishBox.append(logout);logoutControl=logout;
+    logout.addEventListener('click',async()=>{if(publishing||busy)return;if(leagueDraftPending()&&!confirm('6項目の未保存入力だけが失われます。一時保存済みデータは残ります。ログアウトしますか？'))return;try{await request('/auth/v1/logout?scope=local',{method:'POST',token:await adminToken()});}catch{}session=null;dirty=false;location.reload();});
     login.addEventListener('submit',async e=>{
         e.preventDefault();if(loginButton.disabled)return;loginButton.disabled=true;loginStatus.textContent='ログイン中…';
         try{
@@ -680,28 +798,27 @@ if(adminMode){
             const loaded=await readCloud();cloudVersion=loaded.version;
             let snapshot=loaded.snapshot,migration=false;
             if(!snapshot&&localOnly){snapshot=await readPublished();migration=!!snapshot;}
-            applySnapshot(snapshot);ready=true;dirty=migration;
+            const draft=await readPublished(draftKey);
+            let restored=false;
+            if(draft){
+                if(draft.schema!==1||draft.baseVersion!==cloudVersion){
+                    if(!confirm('別の公開版に基づく下書きがあります。最新のクラウドデータを上書きしないため復元できません。古い下書きを残したままログインを中止する場合はキャンセル、破棄する場合はOKを押してください。'))throw new Error('古い下書きを保持しました。');
+                    await savePublished(null,draftKey);
+                }else{snapshot=draft.snapshot;resumeMatch=draft.nextMatch||'';restored=true;}
+            }
+            applySnapshot(snapshot);ready=true;dirty=migration||restored;if(restored&&resumeMatch)refreshLeaguePanel(resumeMatch);
             panel.hidden=false;if(leaguePanel)leaguePanel.hidden=false;publishBox.hidden=false;login.hidden=true;
             updatePublishUI();
-            if(migration)publishStatus.textContent=`ローカル確定版 ${totalRows().toLocaleString('ja-JP')}件を復元。公開許可を確認後、更新終了を押すと初回クラウド移行します。`;
+            if(restored)publishStatus.textContent=`一時保存データを復元：${totalRows().toLocaleString('ja-JP')}件｜未公開。最後に更新終了を押してください。`;
+            else if(migration)publishStatus.textContent=`ローカル確定版 ${totalRows().toLocaleString('ja-JP')}件を復元。公開許可を確認後、更新終了を押すと初回クラウド移行します。`;
         }catch(err){session=null;ready=false;password.value='';loginStatus.textContent='ログイン・読み込み失敗：'+err.message;}
         finally{loginButton.disabled=false;}
     });
     publishButton.addEventListener('click',async()=>{
         if(publishButton.disabled)return;
         if(!confirm('ログイン不要で閲覧できるデータとして公開します。部内の許可を得た選手情報・動画・シートBT所属を確認しましたか？'))return;
-        publishing=true;publishButton.disabled=true;logout.disabled=true;publishStatus.textContent='保存中…';
-        try{
-            const snapshot={version:1,publishedAt:new Date().toISOString(),data:dataByCategory,anchors:[...leagueAnchors]};
-            // 公開する前に復旧可能なローカル確定版を維持する。
-            await savePublished(snapshot,'migration-backup');
-            await publishCloud(snapshot);
-            try{await savePublished(snapshot);}catch{}
-            lastPublished=snapshot.publishedAt;dirty=false;linkBox.hidden=false;
-            publishStatus.textContent=`クラウド更新完了：${totalRows().toLocaleString('ja-JP')}件`;
-        }catch(e){publishStatus.textContent='更新失敗または結果未確認：'+e.message+'。公開済みデータを確認して再試行してください。ローカルのコピーは保持されます。';}
-        finally{publishing=false;logout.disabled=false;publishButton.disabled=!session||!ready||busy>0||!dirty||!totalRows();}
+        await commitPending();
     });
-    window.addEventListener('beforeunload',e=>{if(dirty||busy||publishing){e.preventDefault();e.returnValue='';}});
+    window.addEventListener('beforeunload',e=>{if(busy||publishing||leagueDraftPending()){e.preventDefault();e.returnValue='';}});
     if(!configured())loginStatus.textContent='まず script.js の公開用キーを設定してください。';
 }else loadViewer();
