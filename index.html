@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Baseball Video Search</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <header>
+        <h1>BASEBALL VIDEO SEARCH</h1>
+    </header>
+
+    <div class="container">
+
+        <!-- 左側：検索条件 -->
+        <aside class="sidebar">
+            <h2>検索条件</h2>
+
+            <form id="searchForm">
+
+                <div class="filter-group">
+                    <h3>動画区分</h3>
+
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="category" value="league" checked>
+                        リーグ戦
+                    </label>
+
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="category" value="practice" checked>
+                        OP戦
+                    </label>
+
+                    <label class="checkbox-label">
+                        <input type="checkbox" name="category" value="sheet" checked>
+                        シートバッティング
+                    </label>
+                </div>
+
+                <div class="filter-group">
+                    <label for="year">年度</label>
+                    <select id="year">
+                        <option value="">すべて</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="opponent">対戦相手</label>
+                    <select id="opponent">
+                        <option value="">すべて</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="batter">打者名</label>
+                    <select id="batter">
+                        <option value="">すべて</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="batterSide">打者の左右</label>
+                    <select id="batterSide">
+                        <option value="">すべて</option>
+                        <option value="R">右打者</option>
+                        <option value="L">左打者</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="pitcher">投手名</label>
+                    <select id="pitcher">
+                        <option value="">すべて</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="pitcherSide">投手の左右</label>
+                    <select id="pitcherSide">
+                        <option value="">すべて</option>
+                        <option value="R">右投手</option>
+                        <option value="L">左投手</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="pitchType">球種</label>
+                    <select id="pitchType">
+                        <option value="">すべて</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="result">打撃結果</label>
+                    <select id="result">
+                        <option value="">すべて</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label>球速（km/h）</label>
+
+                    <div class="range-input">
+                        <input type="number" id="minSpeed" placeholder="下限" aria-label="球速の下限">
+                        <span>〜</span>
+                        <input type="number" id="maxSpeed" placeholder="上限" aria-label="球速の上限">
+                    </div>
+                </div>
+
+                <details class="advanced-filter">
+                    <summary>詳細検索</summary>
+                    <p>詳細検索項目は今後追加します。</p>
+                </details>
+
+                <button type="button" class="search-button" id="searchButton">
+                    検索する
+                </button>
+
+                <button type="reset" class="reset-button">
+                    リセット
+                </button>
+
+            </form>
+        </aside>
+
+        <!-- 右側：検索結果 -->
+        <main class="content">
+
+            <div class="result-header">
+                <h2>検索結果</h2>
+                <span id="resultCount">0件</span>
+            </div>
+
+            <!-- 動画再生画面 -->
+            <div class="video-player" id="videoPlayer">
+                <div class="video-placeholder">
+                    <div class="play-icon">▶</div>
+                    <p>動画を選択してください</p>
+                </div>
+            </div>
+
+            <!-- 動画切り替え -->
+            <div class="video-navigation">
+
+                <button type="button" id="prevVideo" disabled>
+                    ◀ 前の動画
+                </button>
+
+                <span id="videoPosition">0 / 0</span>
+
+                <button type="button" id="nextVideo" disabled>
+                    次の動画 ▶
+                </button>
+
+            </div>
+
+            <!-- 撮影アングル -->
+            <section class="angle-section">
+                <h3>撮影アングル</h3>
+
+                <div class="angle-buttons">
+
+                    <button class="angle-button active" type="button" disabled>
+                        ネット裏
+                    </button>
+
+                    <button class="angle-button" type="button" disabled>
+                        センター裏
+                    </button>
+
+                    <button class="angle-button" type="button" disabled>
+                        一塁側
+                    </button>
+
+                    <button class="angle-button" type="button" disabled>
+                        三塁側
+                    </button>
+
+                    <button class="angle-button" type="button" disabled>
+                        一塁側（投手）
+                    </button>
+
+                    <button class="angle-button" type="button" disabled>
+                        三塁側（投手）
+                    </button>
+
+                </div>
+            </section>
+
+            <!-- 打撃情報 -->
+            <section class="pitch-info">
+                <h3>打撃情報</h3>
+
+                <div class="info-grid">
+
+                    <div class="info-item">
+                        <span>打者名</span>
+                        <strong id="infoBatter">―</strong>
+                    </div>
+
+                    <div class="info-item">
+                        <span>投手名</span>
+                        <strong id="infoPitcher">―</strong>
+                    </div>
+
+                    <div class="info-item">
+                        <span>球種</span>
+                        <strong id="infoPitchType">―</strong>
+                    </div>
+
+                    <div class="info-item">
+                        <span>球速</span>
+                        <strong id="infoSpeed">―</strong>
+                    </div>
+
+                    <div class="info-item">
+                        <span>カウント</span>
+                        <strong id="infoCount">―</strong>
+                    </div>
+
+                    <div class="info-item">
+                        <span>打撃結果</span>
+                        <strong id="infoResult">―</strong>
+                    </div>
+
+                </div>
+            </section>
+
+            <!-- 検索結果一覧 -->
+            <section class="result-list">
+
+                <div class="list-header">
+                    <h3>検索結果一覧</h3>
+
+                    <div class="page-size">
+                        <label for="pageSize">表示件数</label>
+
+                        <select id="pageSize">
+                            <option value="25">25件</option>
+                            <option value="50" selected>50件</option>
+                            <option value="100">100件</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="table-wrapper">
+
+                    <table id="resultTable">
+
+                        <thead>
+                            <tr>
+                                <th>No.</th>
+                                <th>動画区分</th>
+                                <th>日付</th>
+                                <th>対戦相手</th>
+                                <th>打者名</th>
+                                <th>投手名</th>
+                                <th>イニング</th>
+                                <th>カウント</th>
+                                <th>球種</th>
+                                <th>球速</th>
+                                <th>打撃結果</th>
+                                <th>再生</th>
+                            </tr>
+                        </thead>
+
+                        <tbody id="resultBody">
+                            <tr>
+                                <td colspan="12" class="empty-table">
+                                    検索結果がここに表示されます
+                                </td>
+                            </tr>
+                        </tbody>
+
+                    </table>
+
+                </div>
+
+                <!-- ページ切り替え -->
+                <div class="pagination">
+
+                    <button type="button" id="prevPage" disabled>
+                        ◀ 前へ
+                    </button>
+
+                    <span id="pageInfo">0 / 0 ページ</span>
+
+                    <button type="button" id="nextPage" disabled>
+                        次へ ▶
+                    </button>
+
+                </div>
+
+            </section>
+
+        </main>
+
+    </div>
+
+    <script src="script.js"></script>
+
+</body>
+</html>

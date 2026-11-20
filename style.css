@@ -1,0 +1,454 @@
+/* 全体の基本設定 */
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: Arial, "Hiragino Sans", sans-serif;
+    background-color: #f0f2f5;
+    color: #172b46;
+}
+
+/* ヘッダー */
+header {
+    height: 70px;
+    background-color: #172b46;
+    color: white;
+    display: flex;
+    align-items: center;
+    padding: 0 25px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+header h1 {
+    font-size: 24px;
+}
+
+/* 全体のレイアウト */
+.container {
+    display: flex;
+    height: calc(100vh - 70px);
+}
+
+/* 左側：検索条件欄 */
+.sidebar {
+    width: 280px;
+    flex-shrink: 0;
+    background-color: #e0e9f3;
+    padding: 20px;
+    border-right: 1px solid #ccd5e0;
+    overflow-y: auto;
+}
+
+/* 見出し */
+h2 {
+    font-size: 20px;
+    margin-bottom: 20px;
+}
+
+h3 {
+    font-size: 14px;
+    margin-bottom: 10px;
+}
+
+/* 検索項目 */
+.filter-group {
+    margin-bottom: 16px;
+}
+
+.filter-group > label:not(.checkbox-label) {
+    display: block;
+    font-size: 13px;
+    font-weight: bold;
+    margin-bottom: 6px;
+}
+
+/* プルダウン */
+select,
+input[type="number"] {
+    width: 100%;
+    height: 36px;
+    padding: 8px;
+    border: 1px solid #b9c5d3;
+    border-radius: 5px;
+    background-color: white;
+    font-size: 13px;
+    color: #172b46;
+}
+
+/* チェックボックス */
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+input[type="checkbox"] {
+    accent-color: #24558e;
+    width: 16px;
+    height: 16px;
+}
+
+/* 球速入力欄 */
+.range-input {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.range-input input {
+    min-width: 0;
+    flex: 1;
+}
+
+/* 詳細検索 */
+.advanced-filter {
+    margin: 18px 0;
+    font-size: 13px;
+}
+
+.advanced-filter summary {
+    cursor: pointer;
+    font-weight: bold;
+}
+
+.advanced-filter p {
+    margin-top: 12px;
+    color: #64748b;
+}
+
+/* 検索ボタン */
+.search-button {
+    width: 100%;
+    padding: 12px;
+    background-color: #24558e;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.search-button:hover {
+    background-color: #172b46;
+}
+
+/* リセットボタン */
+.reset-button {
+    width: 100%;
+    padding: 10px;
+    margin-top: 10px;
+    background-color: transparent;
+    color: #172b46;
+    border: 1px solid #aab8c8;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.reset-button:hover {
+    background-color: #ccd9e8;
+}
+
+/* 右側：検索結果欄 */
+.content {
+    flex: 1;
+    min-width: 0;
+    padding: 25px;
+    background-color: white;
+    overflow-y: auto;
+}
+
+/* 検索結果の見出し */
+.result-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+}
+
+.result-header h2 {
+    margin-bottom: 0;
+}
+
+#resultCount {
+    font-size: 14px;
+    color: #64748b;
+}
+
+/* 動画再生画面 */
+.video-player {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background-color: #111827;
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.video-player iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+}
+
+.video-placeholder {
+    text-align: center;
+    color: #94a3b8;
+}
+
+.play-icon {
+    font-size: 50px;
+    margin-bottom: 15px;
+}
+
+/* 前後の動画への切り替え */
+.video-navigation {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 15px 0 25px;
+}
+
+.video-navigation button {
+    padding: 10px 20px;
+    border: 1px solid #b9c5d3;
+    background-color: white;
+    border-radius: 5px;
+    color: #172b46;
+    cursor: pointer;
+}
+
+#videoPosition {
+    color: #64748b;
+    font-size: 14px;
+}
+
+/* 撮影アングル */
+.angle-section {
+    margin-bottom: 25px;
+}
+
+.angle-buttons {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+}
+
+.angle-button {
+    padding: 12px 5px;
+    border: 1px solid #b9c5d3;
+    border-radius: 5px;
+    background-color: #f1f5f9;
+    color: #172b46;
+    cursor: pointer;
+}
+
+.angle-button.active {
+    background-color: #24558e;
+    color: white;
+    border-color: #24558e;
+}
+
+/* 打撃情報 */
+.pitch-info {
+    border-top: 1px solid #dce3ec;
+    padding-top: 20px;
+}
+
+.info-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+}
+
+.info-item {
+    background-color: #f0f4f8;
+    border-radius: 6px;
+    padding: 15px;
+}
+
+.info-item span {
+    display: block;
+    font-size: 12px;
+    color: #64748b;
+    margin-bottom: 8px;
+}
+
+.info-item strong {
+    font-size: 18px;
+    color: #172b46;
+}
+
+/* 検索結果一覧 */
+.result-list {
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid #dce3ec;
+}
+
+/* 一覧表の見出し */
+.list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.list-header h3 {
+    font-size: 18px;
+    margin-bottom: 0;
+}
+
+/* 表示件数の選択 */
+.page-size {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.page-size select {
+    width: 85px;
+}
+
+/* 一覧表の横スクロール */
+.table-wrapper {
+    width: 100%;
+    overflow-x: auto;
+    border: 1px solid #dce3ec;
+    border-radius: 6px;
+}
+
+/* 一覧表 */
+#resultTable {
+    width: 100%;
+    min-width: 1050px;
+    border-collapse: collapse;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+#resultTable th {
+    background-color: #172b46;
+    color: white;
+    padding: 13px 10px;
+    text-align: center;
+    font-weight: bold;
+}
+
+#resultTable td {
+    padding: 12px 10px;
+    text-align: center;
+    border-bottom: 1px solid #dce3ec;
+}
+
+#resultTable tbody tr:nth-child(even) {
+    background-color: #f5f7fa;
+}
+
+#resultTable tbody tr:hover {
+    background-color: #e0e9f3;
+}
+
+/* 選択中の動画 */
+#resultTable tbody tr.selected {
+    background-color: #cbdff5;
+}
+
+/* 検索結果がない場合 */
+#resultTable .empty-table {
+    height: 100px;
+    text-align: center;
+    color: #94a3b8;
+}
+
+/* 一覧表の再生ボタン */
+.play-button {
+    background-color: #24558e;
+    color: white;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.play-button:hover {
+    background-color: #172b46;
+}
+
+/* ページ切り替え */
+.pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    margin: 20px 0;
+}
+
+.pagination button {
+    padding: 8px 15px;
+    background-color: white;
+    border: 1px solid #b9c5d3;
+    border-radius: 5px;
+    color: #172b46;
+    cursor: pointer;
+}
+
+#pageInfo {
+    font-size: 13px;
+    color: #64748b;
+}
+
+/* 操作できないボタン */
+button:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* スマートフォン対応 */
+@media (max-width: 700px) {
+
+    .container {
+        flex-direction: column;
+        height: auto;
+    }
+
+    .sidebar {
+        width: 100%;
+        height: auto;
+        border-right: none;
+        overflow: visible;
+    }
+
+    .content {
+        overflow: visible;
+        padding: 15px;
+    }
+
+    header h1 {
+        font-size: 18px;
+    }
+
+    .angle-buttons,
+    .info-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .video-navigation button {
+        padding: 8px;
+    }
+
+    .list-header h3 {
+        font-size: 15px;
+    }
+}
