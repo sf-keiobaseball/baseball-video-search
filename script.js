@@ -1,3 +1,6 @@
+// STEP 32: 打撃結果フィルターをストライク・ボール・ファウル・凡打・安打の5分類に変更。
+// STEP 31: 5シート入りExcel (.xlsx) を1回で読み込み。CSVとの後方互換を維持。
+// リーグ戦タイムスタンプ必須。公開済み同期点を照合して引き継ぐ。
 // STEP 30: 試合ごとにIndexedDBへ一時保存。更新終了で一括クラウド公開。
 // STEP 22: Supabaseクラウド保存・管理者認証。
 // STEP 17: 閲覧者の案内欄を非表示・試合区分を追加・全条件の一括解除。
@@ -36,8 +39,11 @@ const resultGroups = {
     "四球",
     "死球"
   ],
-  "凡打": [
+  "ファウル": [
     "ファウル",
+    "ファール"
+  ],
+  "凡打": [
     "一ゴ",
     "二ゴ",
     "三ゴ",
@@ -172,9 +178,13 @@ function parseCSV(text) {
     return out;
 }
 function normalizeCSV(text, category) {
-    const rows=parseCSV(text), headers=(rows.shift()||[]).map(clean);
+    return normalizeRows(parseCSV(text),category);
+}
+function normalizeRows(table, category) {
+    const rows=table.slice(), headers=(rows.shift()||[]).map(clean);
     const sheet=category==='sheet';
     const required=sheet?['日付','打者','投手','Pitch Type','Velocity']:['日付','打者名','投手名','打者チーム','投手チーム','球種','球速'];
+    if(category==='league')required.push('タイムスタンプ');
     const missing=required.filter(k=>!headers.includes(k));
     if(missing.length) throw new Error('CSVの区分または形式が違います。不足列：'+missing.join('、'));
     if(isPractice(category) && !headers.includes('ネット裏')) throw new Error('OP戦・紅白戦用のCSVを選択してください（ネット裏列が必要）。');
@@ -202,12 +212,67 @@ function normalizeCSV(text, category) {
     }
     return normalized;
 }
+// STEP 31: Excelは管理者のブラウザ内で解析する（Excel本体はSupabaseに送信しない）。
+// SheetJS 0.20.3 の公式配布版を必要時だけ読み込む。既存の index.html への追記は不要。
+const EXCEL_LIBRARY_URL='https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+let excelLibraryLoading=null;
+function loadExcelLibrary(){
+    if(window.XLSX)return Promise.resolve(window.XLSX);
+    if(excelLibraryLoading)return excelLibraryLoading;
+    excelLibraryLoading=new Promise((resolve,reject)=>{
+        const script=document.createElement('script');script.src=EXCEL_LIBRARY_URL;
+        script.async=true;
+        script.onload=()=>window.XLSX?resolve(window.XLSX):reject(new Error('Excel解析ライブラリを読み込めませんでした。'));
+        script.onerror=()=>reject(new Error('Excel解析ライブラリへの接続に失敗しました。ネット接続・通信制限を確認してください。'));
+        document.head.append(script);
+    }).catch(err=>{excelLibraryLoading=null;throw err;});
+    return excelLibraryLoading;
+}
+const twoDigits=n=>String(n).padStart(2,'0');
+function fromExcelSerial(value,kind='date'){
+    // Excel 1900日付システム（通常の.xlsx）。日付/日時は常に日本の壁時計時刻として扱う。
+    if(typeof value!=='number'||!Number.isFinite(value))return value;
+    if(kind==='time'&&value>=0&&value<1){
+        const sec=((Math.round(value*86400)%86400)+86400)%86400;
+        return `${twoDigits(Math.floor(sec/3600))}:${twoDigits(Math.floor(sec/60)%60)}:${twoDigits(sec%60)}`;
+    }
+    if(value<20000||value>=80000)return value;
+    const d=new Date(Date.UTC(1899,11,30)+Math.round(value*86400000));
+    if(!Number.isFinite(d.valueOf()))return value;
+    const date=`${d.getUTCFullYear()}/${twoDigits(d.getUTCMonth()+1)}/${twoDigits(d.getUTCDate())}`;
+    return kind==='datetime'?date+' '+[d.getUTCHours(),d.getUTCMinutes(),d.getUTCSeconds()].map(twoDigits).join(':'):date;
+}
+function readExcelCategory(workbook, category, sheetName){
+    const XLSX=window.XLSX, sheet=workbook.Sheets[sheetName];
+    if(!sheet)throw new Error('Excelに「'+sheetName+'」シートがありません。シート名を確認してください。');
+    const rows=XLSX.utils.sheet_to_json(sheet,{header:1,raw:true,defval:'',blankrows:false});
+    if(rows.length<2)throw new Error('「'+sheetName+'」にデータがありません。');
+    const header=rows[0].map(clean);
+    const dateCol=header.indexOf('日付'),stampCol=header.indexOf('タイムスタンプ'),timeCol=header.indexOf('Time');
+    if(category==='league'&&stampCol<0){
+        throw new Error('リーグ戦の「タイムスタンプ」列がありません。提供した時刻修正版Excelを使用してください。');
+    }
+    // バックアップしやすいよう元の.xlsx/ワークシートは変更しない。
+    for(let i=1;i<rows.length;i++){
+        const r=rows[i];
+        if(dateCol>=0)r[dateCol]=fromExcelSerial(r[dateCol],'date');
+        if(stampCol>=0)r[stampCol]=fromExcelSerial(r[stampCol],'datetime');
+        if(category==='sheet'&&timeCol>=0)r[timeCol]=fromExcelSerial(r[timeCol],'time');
+    }
+    const normalized=normalizeRows(rows,category);
+    if(!normalized.length)throw new Error('「'+sheetName+'」は読み込み対象が0件です。日付・打者チーム等を確認してください。');
+    if(category==='league'&&normalized.some(r=>clockSeconds(r.timestamp)===null)){
+        throw new Error('リーグ戦に無効なタイムスタンプがあります。年月日と時分秒を確認してください。');
+    }
+    return normalized;
+}
 const dataByCategory={league:[],practice:[],practiceB:[],intraSquad:[],sheet:[]};
 let results=[], page=1, selectedIndex=-1, selectedAngle=null;
 const form=$('searchForm');
 // 既存HTMLを変更せず検索フォームだけを再構築する。
 const filterFields = [['year','年度'],['date','日付'],['category','試合区分'],['opponent','対戦大学'],['pitcher','投手'],['batter','打者'],['result','打撃結果']];
-const filterValue = (record,key) => key==='result' ? record.resultClass : record[key];
+// 保存済みデータの古い分類を参照せず、最新の5分類で都度判定する。
+const filterValue = (record,key) => key==='result' ? classifyResult(record.result || record.atBatResult || record.pitchResult) : record[key];
 form.replaceChildren();
 for(const [key,name] of filterFields){
     const group=document.createElement('div');group.className='filter-group';
@@ -223,12 +288,18 @@ form.append(searchButton,resetButton);
 const panel=document.createElement('details');
 panel.open=true;
 panel.style.cssText='margin-bottom:20px;padding:12px;background:#fff;border:1px solid #b9c5d3;border-radius:6px;font-size:12px;';
-const summary=document.createElement('summary');summary.textContent='CSV読み込み（管理者用）';summary.style.cssText='font-weight:bold;cursor:pointer;margin-bottom:8px;';panel.append(summary);
-const hint=document.createElement('p');hint.textContent='更新する区分だけ選択してください。同じ区分は差し替え、他の区分は保持します。更新終了まで閲覧ページには反映されません。';hint.style.marginBottom='12px';panel.append(hint);
+const summary=document.createElement('summary');summary.textContent='打者動画データ読み込み（Excel 1ファイル対応）';summary.style.cssText='font-weight:bold;cursor:pointer;margin-bottom:8px;';panel.append(summary);
+const excelHint=document.createElement('p');excelHint.textContent='5つのシート（リーグ戦／OP戦(A)／OP戦(B)／紅白戦／シートBT）が入ったExcelを1つ選択してください。すべて読み取ってブラウザ内に一時保存し、「更新終了・一括保存」で初めて閲覧者側へ反映します。';excelHint.style.cssText='line-height:1.6;margin:8px 0 10px';panel.append(excelHint);
+const excelLabel=document.createElement('label');excelLabel.textContent='5試合区分まとめて読み込み（.xlsx）';excelLabel.style.cssText='display:block;font-weight:bold;margin:10px 0';
+const excelInput=document.createElement('input');excelInput.type='file';excelInput.accept='.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';excelInput.style.cssText='display:block;width:100%;font-size:12px;margin-top:8px';excelLabel.append(excelInput);panel.append(excelLabel);
+const excelStatus=document.createElement('p');excelStatus.textContent='Excel未読み込み';excelStatus.setAttribute('aria-live','polite');excelStatus.style.cssText='white-space:pre-line;line-height:1.5;overflow-wrap:anywhere';panel.append(excelStatus);
+const legacyCSV=document.createElement('details');legacyCSV.style.cssText='margin-top:14px;border-top:1px solid #cbd5e1;padding-top:10px';
+const legacyTitle=document.createElement('summary');legacyTitle.textContent='従来のCSVを区分別に読み込む（必要な場合のみ）';legacyTitle.style.cssText='font-weight:bold;cursor:pointer;';legacyCSV.append(legacyTitle);panel.append(legacyCSV);
+const hint=document.createElement('p');hint.textContent='CSVでは更新する区分だけ選択できます。他の区分は保持します。Excelでは全5区分をまとめて差し替えます。更新終了まで閲覧者ページには反映されません。';hint.style.marginBottom='12px';legacyCSV.append(hint);
 for(const category of Object.keys(labels)) {
     const label=document.createElement('label');label.textContent=labels[category];label.style.cssText='display:block;font-weight:bold;margin-top:10px;';
-    const input=document.createElement('input');input.type='file';input.accept='.csv,text/csv';input.style.cssText='display:block;width:100%;font-size:11px;margin:6px 0;';label.append(input);panel.append(label);
-    const status=document.createElement('p');status.textContent='未読み込み';status.setAttribute('aria-live','polite');status.style.cssText='color:#64748b;overflow-wrap:anywhere;';panel.append(status);uploadStatuses.set(category,status);
+    const input=document.createElement('input');input.type='file';input.accept='.csv,text/csv';input.style.cssText='display:block;width:100%;font-size:11px;margin:6px 0;';label.append(input);legacyCSV.append(label);
+    const status=document.createElement('p');status.textContent='未読み込み';status.setAttribute('aria-live','polite');status.style.cssText='color:#64748b;overflow-wrap:anywhere;';legacyCSV.append(status);uploadStatuses.set(category,status);
     input.addEventListener('change',async()=>{
         const file=input.files[0];if(!file||!ready||publishing||busy){input.value='';return;}
         if(leagueDraftPending()){alert('先にリーグ戦の入力を一時保存してください。');input.value='';return;}
@@ -249,6 +320,51 @@ for(const category of Object.keys(labels)) {
         finally {input.disabled=false;input.value='';busy--;if(leagueBox)leagueBox.inert=false;updatePublishUI();}
     });
 }
+// 5シートがすべて正しく読めることを確認してから一括差し替え。失敗時は以前のデータを保持。
+excelInput.addEventListener('change',async()=>{
+    const file=excelInput.files?.[0];
+    if(!file||!ready||!session||publishing||busy){excelInput.value='';return;}
+    if(leagueDraftPending()){alert('先にリーグ戦の未保存入力を一時保存してください。');excelInput.value='';return;}
+    if(!/\.xlsx$/i.test(file.name)){excelStatus.textContent='Excel（.xlsx）ファイルを選択してください。';excelInput.value='';return;}
+    const before=Object.fromEntries(Object.keys(labels).map(k=>[k,dataByCategory[k]]));
+    const oldAnchors=new Map(leagueAnchors),oldDirty=dirty,oldResume=resumeMatch;
+    busy++;excelInput.disabled=true;panel.inert=true;const leagueBox=panel.nextElementSibling;if(leagueBox)leagueBox.inert=true;updatePublishUI();
+    try{
+        excelStatus.textContent='Excel解析ライブラリを読み込み中…';
+        const XLSX=await loadExcelLibrary();
+        excelStatus.textContent='Excelの5シートを解析しています…';
+        const workbook=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:false,dense:true});
+        const parsed={};
+        for(const [category,name] of Object.entries(labels)){
+            excelStatus.textContent='読み込み中：'+name;
+            parsed[category]=readExcelCategory(workbook,category,name);
+        }
+        const remap=remapLeagueAnchors(before.league,parsed.league);
+        if(remap.dropped>0&&!confirm('リーグ戦の既存動画同期点が '+remap.dropped+'件引き継げません。これらの再登録が必要です。新しいExcelで一時保存してもよいですか？（キャンセルすると現在のデータを保持）')){
+            throw new Error('同期点が失われないよう、読み込みをキャンセルしました。');
+        }
+        for(const key of Object.keys(labels))dataByCategory[key]=parsed[key];
+        leagueAnchors.clear();for(const [k,v] of remap.entries)leagueAnchors.set(k,v);
+        resumeMatch='';
+        await persistDraft();
+        markDirty();refreshLeaguePanel();populateFilters();search();
+        for(const [cat,name] of Object.entries(labels)){
+            const status=uploadStatuses.get(cat);
+            status.textContent=parsed[cat].length.toLocaleString('ja-JP')+'件 Excelから一時読み込み済み';status.style.color='#17633a';
+        }
+        const total=Object.values(parsed).reduce((v,rows)=>v+rows.length,0);
+        excelStatus.textContent='5シート一括読み込み完了（未公開）\n'+Object.entries(labels).map(([cat,name])=>name+'：'+parsed[cat].length.toLocaleString('ja-JP')+'件').join('／')+'\n合計：'+total.toLocaleString('ja-JP')+'件。リーグ戦同期点：'+remap.kept+'件引継ぎ'+(remap.dropped?'／要再登録'+remap.dropped+'件':'')+'。最後に「更新終了・一括保存」を押してください。';
+        excelStatus.style.color='#17633a';
+    }catch(e){
+        for(const key of Object.keys(labels))dataByCategory[key]=before[key];
+        leagueAnchors.clear();for(const [k,v] of oldAnchors)leagueAnchors.set(k,v);
+        dirty=oldDirty;resumeMatch=oldResume;
+        excelStatus.textContent='Excel読み込み失敗：'+e.message+'\n既存のデータ・動画設定は保持されています。';excelStatus.style.color='#b42318';
+    }finally{
+        excelInput.disabled=false;excelInput.value='';busy--;panel.inert=false;
+        if(leagueBox)leagueBox.inert=false;updatePublishUI();
+    }
+});
 if(adminMode)form.before(panel);
 // 他の6項目の条件に合うデータから、各項目の選択肢を作成する。
 function selectedFilters() {
@@ -421,7 +537,7 @@ $('prevVideo').addEventListener('click',()=>selectVideo(selectedIndex-1,true));
 $('nextVideo').addEventListener('click',()=>selectVideo(selectedIndex+1,true));
 clearSelection();
 
-// STEP 8: リーグ戦の同期。登録は今回のブラウザタブ内のみ。
+// STEP 8/30: リーグ戦の同期。登録はブラウザの一時保存に保持。
 const leagueAnchors = new Map();
 const leagueMatchKey = r => JSON.stringify([r.date,r.opponent]);
 const leagueGroupKey = r => JSON.stringify([r.date,r.opponent,r.inning]);
@@ -728,7 +844,7 @@ const localOnly=location.hostname==='localhost'||location.hostname==='127.0.0.1'
 const viewer=new URL(location.href);viewer.search='';viewer.hash='';const viewerURL=viewer.href;
 const publishBox=document.createElement('section');publishBox.style.cssText=panel.style.cssText;
 const heading=document.createElement('h3');heading.textContent='更新管理（クラウド）';publishBox.append(heading);
-const note=document.createElement('p');note.style.cssText='line-height:1.6;margin-bottom:8px';note.textContent='各試合の一時保存はこのブラウザ内だけに保存されます。CSV・動画登録・途中補正は最後に更新終了を押すと一括公開されます。';publishBox.append(note);
+const note=document.createElement('p');note.style.cssText='line-height:1.6;margin-bottom:8px';note.textContent='Excel（5シート）・従来CSV・リーグ戦動画登録・途中補正は、ブラウザ内へ一時保存後、最後に「更新終了・一括保存」を押すと一括公開されます。';publishBox.append(note);
 const publishStatus=document.createElement('p');publishStatus.setAttribute('aria-live','polite');publishStatus.style.cssText='line-height:1.6;overflow-wrap:anywhere;margin:6px 0';publishBox.append(publishStatus);
 const publishButton=document.createElement('button');publishButton.type='button';publishButton.className='search-button';publishButton.textContent='更新終了・一括保存';publishButton.disabled=true;
 const linkBox=document.createElement('div');linkBox.hidden=true;linkBox.style.cssText='margin-top:12px;overflow-wrap:anywhere;line-height:1.6';
