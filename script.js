@@ -1,3 +1,4 @@
+// STEP 33: 全7項目をチェックボックスで複数選択可能に変更。同項目OR・異項目AND、候補連動。
 // STEP 32: 打撃結果フィルターをストライク・ボール・ファウル・凡打・安打の5分類に変更。
 // STEP 31: 5シート入りExcel (.xlsx) を1回で読み込み。CSVとの後方互換を維持。
 // リーグ戦タイムスタンプ必須。公開済み同期点を照合して引き継ぐ。
@@ -271,15 +272,51 @@ let results=[], page=1, selectedIndex=-1, selectedAngle=null;
 const form=$('searchForm');
 // 既存HTMLを変更せず検索フォームだけを再構築する。
 const filterFields = [['year','年度'],['date','日付'],['category','試合区分'],['opponent','対戦大学'],['pitcher','投手'],['batter','打者'],['result','打撃結果']];
+// STEP 33: 全7項目でチェックボックス式の複数選択を可能にする。
+// 同じ項目はOR、異なる項目はAND。元の投球データや公開データの保存形式は変更しない。
 // 保存済みデータの古い分類を参照せず、最新の5分類で都度判定する。
 const filterValue = (record,key) => key==='result' ? classifyResult(record.result || record.atBatResult || record.pitchResult) : record[key];
+const filterSelections=Object.fromEntries(filterFields.map(([key])=>[key,new Set()]));
+const filterPanels=Object.create(null);
+const filterStyle=document.createElement('style');
+filterStyle.textContent=`
+.bvs-multi-filter{margin-top:6px;background:#fff;border:1px solid #b9c5d3;border-radius:6px;color:#172b46;overflow:hidden}
+.bvs-multi-filter>summary{display:block;list-style:none;cursor:pointer;position:relative;padding:10px 30px 10px 12px;min-height:42px;line-height:1.45;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bvs-multi-filter>summary::-webkit-details-marker{display:none}
+.bvs-multi-filter>summary::after{content:'▾';position:absolute;right:12px;top:10px;color:#24558e}
+.bvs-multi-filter[open]>summary::after{content:'▴'}
+.bvs-multi-filter[open]>summary{background:#eef4fb}
+.bvs-multi-filter>summary:focus-visible{outline:2px solid #24558e;outline-offset:-2px}
+.bvs-multi-body{padding:8px;border-top:1px solid #d8e1ec}
+.bvs-multi-search{display:block;width:100%;min-width:0;box-sizing:border-box;padding:8px;border:1px solid #b9c5d3;border-radius:4px;font-size:13px}
+.bvs-multi-options{max-height:220px;overflow-y:auto;overscroll-behavior:contain;margin-top:7px}
+.bvs-multi-option{display:flex!important;align-items:center;gap:8px;padding:7px 4px;cursor:pointer;line-height:1.4;font-size:13px;font-weight:normal!important;overflow-wrap:anywhere}
+.bvs-multi-option:hover{background:#f0f5fa}
+.bvs-multi-option input{flex:0 0 auto;width:16px;height:16px;margin:0;accent-color:#24558e}
+.bvs-multi-option.bvs-unavailable{color:#a33c32}
+.bvs-multi-meta{font-size:11px;color:#64748b;margin:6px 0}
+.bvs-multi-clear{font-size:12px;padding:5px 7px;border:1px solid #b9c5d3;border-radius:4px;background:white;color:#24558e;cursor:pointer}
+.bvs-multi-clear:disabled{opacity:.45;cursor:default}
+`;
+document.head.append(filterStyle);
 form.replaceChildren();
 for(const [key,name] of filterFields){
     const group=document.createElement('div');group.className='filter-group';
-    const label=document.createElement('label');label.htmlFor=key;label.textContent=name;
-    const select=document.createElement('select');select.id=key;
-    select.append(new Option('すべて',''));
-    group.append(label,select);form.append(group);
+    const label=document.createElement('label');label.textContent=name;
+    const details=document.createElement('details');details.id='multi-'+key;details.className='bvs-multi-filter';
+    const summary=document.createElement('summary');summary.textContent='すべて';
+    const body=document.createElement('div');body.className='bvs-multi-body';
+    const query=document.createElement('input');query.type='search';query.className='bvs-multi-search';query.placeholder='候補を検索';query.setAttribute('aria-label',name+'の候補を検索');
+    const meta=document.createElement('div');meta.className='bvs-multi-meta';
+    const list=document.createElement('div');list.className='bvs-multi-options';
+    const clear=document.createElement('button');clear.type='button';clear.className='bvs-multi-clear';clear.textContent='この項目の選択を解除';
+    clear.addEventListener('click',()=>{filterSelections[key].clear();populateFilters();});
+    query.addEventListener('input',()=>renderFilterOptions(key));
+    body.append(query,meta,list,clear);details.append(summary,body);group.append(label,details);form.append(group);
+    filterPanels[key]={details,summary,query,meta,list,clear,values:[],available:new Set()};
+    details.addEventListener('toggle',()=>{
+        if(details.open)for(const [otherKey,panel] of Object.entries(filterPanels))if(otherKey!==key)panel.details.open=false;
+    });
 }
 const searchButton=document.createElement('button');searchButton.type='button';searchButton.id='searchButton';searchButton.className='search-button';searchButton.textContent='検索する';
 const resetButton=document.createElement('button');resetButton.type='button';resetButton.id='clearFilters';resetButton.className='reset-button';resetButton.textContent='絞り込みを全解除';
@@ -366,39 +403,73 @@ excelInput.addEventListener('change',async()=>{
     }
 });
 if(adminMode)form.before(panel);
-// 他の6項目の条件に合うデータから、各項目の選択肢を作成する。
-function selectedFilters() {
-    return Object.fromEntries(filterFields.map(([key])=>[key,$(key).value]));
+// ほかの6項目の条件に合うデータから、各項目の候補を作る。
+// 同じ項目で複数選択した値はOR、異なる項目はANDで判定する。
+function selectedFilters(){
+    return Object.fromEntries(filterFields.map(([key])=>[key,filterSelections[key]]));
 }
-function matchesFilters(record, selected, exceptKey=null) {
-    return filterFields.every(([key])=>key===exceptKey||!selected[key]||filterValue(record,key)===selected[key]);
+function matchesFilters(record,selected,exceptKey=null){
+    return filterFields.every(([key])=>key===exceptKey||selected[key].size===0||selected[key].has(filterValue(record,key)));
 }
-function availableFilterValues(all, selected, key) {
+function availableFilterValues(all,selected,key){
     const values=new Set();
-    for(const record of all) {
+    for(const record of all){
         if(!matchesFilters(record,selected,key))continue;
         const value=filterValue(record,key);
         if(value)values.add(value);
     }
-    if(key==='result')return Object.keys(resultGroups).filter(value=>values.has(value));
-    if(key==='category')return Object.keys(labels).filter(value=>values.has(value));
+    if(key==='result')return Object.keys(resultGroups).filter(v=>values.has(v));
+    if(key==='category')return Object.keys(labels).filter(v=>values.has(v));
     return [...values].sort((a,b)=>a.localeCompare(b,'ja',{numeric:true}));
 }
-function populateFilters() {
-    const all=Object.values(dataByCategory).flat();
-    let selected=selectedFilters();
-    // CSV差し替えで組み合わせが消えた場合だけ、検索条件を解除する。
-    if(Object.values(selected).some(Boolean)&&!all.some(r=>matchesFilters(r,selected))) {
-        selected=Object.fromEntries(filterFields.map(([key])=>[key,'']));
+function filterDisplay(key,value){return key==='category'?(labels[value]||value):value;}
+function renderFilterOptions(key){
+    const panel=filterPanels[key],selection=filterSelections[key];
+    const names=[...selection].map(v=>filterDisplay(key,v));
+    panel.summary.textContent=selection.size===0?'すべて':selection.size===1?names[0]:selection.size+'件選択：'+names.slice(0,2).join('、')+(names.length>2?'…':'');
+    panel.summary.title=selection.size?names.join('、'):'すべて';
+    panel.clear.disabled=selection.size===0;
+    // 他の項目を変更して候補から外れても、チェックした値を勝手に消さない。
+    // 選択中の値は下部に残し、利用者が明示的に解除できるようにする。
+    const values=[...panel.values,...[...selection].filter(v=>!panel.available.has(v))];
+    const query=panel.query.value.trim().toLocaleLowerCase('ja');
+    const visible=query?values.filter(v=>filterDisplay(key,v).toLocaleLowerCase('ja').includes(query)):values;
+    const scroll=panel.list.scrollTop;
+    const fragment=document.createDocumentFragment();
+    for(const value of visible){
+        const row=document.createElement('label');row.className='bvs-multi-option';
+        const check=document.createElement('input');check.type='checkbox';check.checked=selection.has(value);
+        const caption=document.createElement('span');
+        const noMatch=!panel.available.has(value);
+        caption.textContent=filterDisplay(key,value)+(noMatch?'（他の条件とは一致しません）':'');
+        if(noMatch)row.classList.add('bvs-unavailable');
+        check.addEventListener('change',()=>{
+            if(check.checked)filterSelections[key].add(value);
+            else filterSelections[key].delete(value);
+            populateFilters();
+        });
+        row.append(check,caption);fragment.append(row);
     }
-    // 同じ選択状態を基準に、7項目すべてを更新する（更新順に依存しない）。
-    for(const [key] of filterFields) {
-        const values=availableFilterValues(all,selected,key), sel=$(key);
-        sel.replaceChildren(new Option('すべて',''),...values.map(v=>new Option(key==='category'?labels[v]:v,v)));
-        sel.value=values.includes(selected[key])?selected[key]:'';
+    if(!visible.length){const p=document.createElement('p');p.className='bvs-multi-meta';p.textContent='候補がありません';fragment.append(p);}
+    panel.list.replaceChildren(fragment);
+    panel.list.scrollTop=scroll;
+    panel.meta.textContent=panel.values.length+'件の候補'+(selection.size?'・'+selection.size+'件選択中':'');
+}
+function populateFilters(){
+    const all=Object.values(dataByCategory).flat();
+    // Excel/CSVの差し替えで存在しなくなった値だけを解除。組み合わせが0件でも選択は保持する。
+    for(const [key] of filterFields){
+        const existing=new Set(all.map(r=>filterValue(r,key)).filter(Boolean));
+        for(const value of filterSelections[key])if(!existing.has(value))filterSelections[key].delete(value);
+    }
+    const selected=selectedFilters();
+    for(const [key] of filterFields){
+        const values=availableFilterValues(all,selected,key),panel=filterPanels[key];
+        panel.values=values;panel.available=new Set(values);
+        renderFilterOptions(key);
     }
 }
-function search() {
+function search(){
     const selected=selectedFilters();
     results=Object.values(dataByCategory).flat().filter(r=>matchesFilters(r,selected));
     page=1;clearSelection();renderTable();
@@ -427,10 +498,12 @@ function renderTable() {
 }
 $('searchButton').addEventListener('click',search);
 form.addEventListener('submit',e=>{e.preventDefault();search();});
-// 選択肢だけを即時更新し、動画・一覧は検索ボタンまで変更しない。
-for(const [key] of filterFields)$(key).addEventListener('change',populateFilters);
+// 候補はチェックごとに連動。検索結果は「検索する」で反映する。
 function clearAllFilters(){
-    for(const [key] of filterFields)$(key).value='';
+    for(const [key] of filterFields){
+        filterSelections[key].clear();filterPanels[key].query.value='';
+        filterPanels[key].details.open=false;
+    }
     populateFilters();search();
 }
 resetButton.addEventListener('click',clearAllFilters);
