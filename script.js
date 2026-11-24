@@ -1,3 +1,4 @@
+// STEP 39: 野手・投手とも再生可能なアングルが1つ以上ある投球だけを検索結果に表示。候補とカレンダーも動画ありに限定。
 // STEP 38: 入口のタイトル下の説明を削除。投手アイコンはユーザー提供の実写野球ボール写真（WebP内蔵）に変更。
 // STEP 37: 入口の選択カードから説明文を削除し、野手=バット・投手=野球ボールのSVGイラストに変更。
 // STEP 36: 入口で野手／投手を選択。野手7項目を維持、投手8項目・4アングル／2画面対応。
@@ -21,7 +22,7 @@ let dirty = false, busy = 0, publishing = false, ready = false;
 let leagueDraftPending=()=>false;
 let resumeMatch='';
 const uploadStatuses = new Map();
-function markDirty(){dirty=true;updatePublishUI();}
+function markDirty(){invalidateVideoSearchCache();dirty=true;updatePublishUI();}
 
 const labels = {league:'リーグ戦', practice:'OP戦(A)', practiceB:'OP戦(B)', intraSquad:'紅白戦', sheet:'シートBT'};
 const isPractice = category => category === 'practice' || category === 'practiceB' || category === 'intraSquad';
@@ -417,14 +418,14 @@ for(const category of Object.keys(labels)) {
             const records=normalizeCSV(await file.text(),category);
             const remap=category==='league'?remapLeagueAnchors(dataByCategory.league,records):null;
             dataByCategory[category]=records;
-            if(remap){leagueAnchors.clear();for(const [k,v] of remap.entries)leagueAnchors.set(k,v);}
+            if(remap){leagueAnchors.clear();invalidateVideoSearchCache();for(const [k,v] of remap.entries)leagueAnchors.set(k,v);}
             await persistDraft();
             if(remap)refreshLeaguePanel();
             markDirty();
             status.textContent=`${records.length.toLocaleString('ja-JP')}件 読み込み完了`+(category==='sheet'?'（所属未確認）':'')+(remap?`｜リーグ戦基準点：${remap.kept}件引継ぎ、${remap.dropped}件要再登録`:'');
             status.style.color='#17633a';
             populateFilters();search();
-        } catch(e) {dataByCategory[category]=oldRows;leagueAnchors.clear();for(const [k,v] of oldAnchors)leagueAnchors.set(k,v);dirty=oldDirty;status.textContent='読み込み失敗：'+e.message+'（以前のデータは保持）';status.style.color='#b42318';}
+        } catch(e) {dataByCategory[category]=oldRows;leagueAnchors.clear();invalidateVideoSearchCache();for(const [k,v] of oldAnchors)leagueAnchors.set(k,v);dirty=oldDirty;status.textContent='読み込み失敗：'+e.message+'（以前のデータは保持）';status.style.color='#b42318';}
         finally {input.disabled=false;input.value='';busy--;if(leagueBox)leagueBox.inert=false;updatePublishUI();}
     });
 }
@@ -452,7 +453,7 @@ excelInput.addEventListener('change',async()=>{
             throw new Error('同期点が失われないよう、読み込みをキャンセルしました。');
         }
         for(const key of Object.keys(labels))dataByCategory[key]=parsed[key];
-        leagueAnchors.clear();for(const [k,v] of remap.entries)leagueAnchors.set(k,v);
+        leagueAnchors.clear();invalidateVideoSearchCache();for(const [k,v] of remap.entries)leagueAnchors.set(k,v);
         resumeMatch='';
         await persistDraft();
         markDirty();refreshLeaguePanel();populateFilters();search();
@@ -465,7 +466,7 @@ excelInput.addEventListener('change',async()=>{
         excelStatus.style.color='#17633a';
     }catch(e){
         for(const key of Object.keys(labels))dataByCategory[key]=before[key];
-        leagueAnchors.clear();for(const [k,v] of oldAnchors)leagueAnchors.set(k,v);
+        leagueAnchors.clear();invalidateVideoSearchCache();for(const [k,v] of oldAnchors)leagueAnchors.set(k,v);
         dirty=oldDirty;resumeMatch=oldResume;
         excelStatus.textContent='Excel読み込み失敗：'+e.message+'\n既存のデータ・動画設定は保持されています。';excelStatus.style.color='#b42318';
     }finally{
@@ -498,7 +499,8 @@ function filterDisplay(key,value){return key==='category'?(labels[value]||value)
 // 一度に複数日を選択でき、別の月へ移動しても選択を保持する。
 function renderDateCalendar(panel){
     const chosen=filterSelections.date;
-    const allDates=[...new Set(Object.values(dataByCategory).flat().map(r=>r.date).filter(d=>/^\d{4}\/\d{2}\/\d{2}$/.test(d)))].sort();
+    // 動画なしの日付や、現在と異なる野手／投手ビューの日付を候補に出さない。
+    const allDates=[...new Set(playableRecordsForView().map(r=>r.date).filter(d=>/^\d{4}\/\d{2}\/\d{2}$/.test(d)))].sort();
     const allDateSet=new Set(allDates);
     const possible=[...panel.available].sort();
     const monthFromDate=d=>d.slice(0,7).replace('/','-');
@@ -596,7 +598,8 @@ function renderFilterOptions(key){
     panel.meta.textContent=panel.values.length+'件の候補'+(selection.size?'・'+selection.size+'件選択中':'');
 }
 function populateFilters(){
-    const all=Object.values(dataByCategory).flat().filter(r=>recordView(r)===activeView);
+    // 絞り込み候補自体も、今のビューで再生可能な投球から生成する。
+    const all=playableRecordsForView();
     // Excel/CSVの差し替えで存在しなくなった値だけを解除。組み合わせが0件でも選択は保持する。
     for(const [key] of filterFields){
         const existing=new Set(all.map(r=>filterValue(r,key)).filter(Boolean));
@@ -611,7 +614,8 @@ function populateFilters(){
 }
 function search(){
     const selected=selectedFilters();
-    results=Object.values(dataByCategory).flat().filter(r=>recordView(r)===activeView&&matchesFilters(r,selected));
+    // 動画ありの投球のみ。複数選択・日付カレンダー・2画面の既存動作は変更しない。
+    results=playableRecordsForView().filter(r=>matchesFilters(r,selected));
     page=1;clearSelection();renderTable();
 }
 function renderTable() {
@@ -621,7 +625,7 @@ function renderTable() {
     $('pageInfo').textContent=`${total?page:0} / ${total} ページ`;
     $('prevPage').disabled=page<=1;$('nextPage').disabled=page>=total;
     const body=$('resultBody');body.replaceChildren();
-    if(!results.length){const row=body.insertRow(),cell=row.insertCell();cell.colSpan=12;cell.className='empty-table';cell.textContent=activeView==='pitcher'&&!Object.values(dataByCategory).flat().some(r=>recordView(r)==='pitcher')?'投手動画データはまだ公開されていません。管理者サイトで5シートExcelを再読み込みし、「更新終了・一括保存」で公開してください。':'該当するデータがありません';return;}
+    if(!results.length){const row=body.insertRow(),cell=row.insertCell();cell.colSpan=12;cell.className='empty-table';cell.textContent=activeView==='pitcher'&&!Object.values(dataByCategory).flat().some(r=>recordView(r)==='pitcher')?'投手動画データはまだ公開されていません。管理者サイトで5シートExcelを再読み込みし、「更新終了・一括保存」で公開してください。':!playableRecordsForView().length?'この画面では再生可能な動画がまだ登録されていません。動画URL・再生時刻・リーグ戦の同期点を確認してください。':'条件に一致する再生可能な動画がありません';return;}
     const start=(page-1)*size;
     for(const [i,r] of results.slice(start,start+size).entries()) {
         const tr=body.insertRow();
@@ -694,10 +698,31 @@ function parseYouTube(angle) {
         return {id,start};
     }catch{return null;}
 }
+// STEP 39: 1投球につき、許可されたアングルに有効な動画IDと再生時刻があるか確認。
+// 大量データの複数選択でも繰り返しYouTube URLを解析しないようキャッシュする。
+// 下書き変更・同期点編集・クラウド読み込み時には必ず破棄する。
+let playableAngleCache=new WeakMap();
+const playableListCache=new Map();
+function invalidateVideoSearchCache(){
+    playableAngleCache=new WeakMap();
+    playableListCache.clear();
+}
 function playableAngles(record) {
-    const allowed=new Set(allowedAngles(activeView));
-    if(record.category==='league') return Object.fromEntries(angleOrder.filter(a=>allowed.has(a)).map(a=>[a,leagueAngle(record,a)]).filter(([,v])=>v!==null));
-    return Object.fromEntries(Object.entries(record.angles||{}).filter(([key])=>allowed.has(key)).map(([key,val])=>[key,parseYouTube(val)]).filter(([,val])=>val!==null));
+    const existing=playableAngleCache.get(record);
+    if(existing)return existing;
+    const allowed=new Set(allowedAngles(recordView(record)));
+    const angles=record.category==='league'
+        ?Object.fromEntries(angleOrder.filter(a=>allowed.has(a)).map(a=>[a,leagueAngle(record,a)]).filter(([,v])=>v!==null))
+        :Object.fromEntries(Object.entries(record.angles||{}).filter(([key])=>allowed.has(key)).map(([key,val])=>[key,parseYouTube(val)]).filter(([,val])=>val!==null));
+    playableAngleCache.set(record,angles);
+    return angles;
+}
+function hasPlayableVideo(record){return Object.keys(playableAngles(record)).length>0;}
+function playableRecordsForView(view=activeView){
+    if(playableListCache.has(view))return playableListCache.get(view);
+    const list=Object.values(dataByCategory).flat().filter(r=>recordView(r)===view&&hasPlayableVideo(r));
+    playableListCache.set(view,list);
+    return list;
 }
 const angleOrder=['ネット裏','センター裏','一塁側','三塁側','一塁側(投手)','三塁側(投手)'];
 const angleButtons=[...document.querySelectorAll('.angle-button')];
@@ -891,6 +916,7 @@ function anchorSlot(r, angle) {return JSON.stringify([leagueGroupKey(r),angle]);
 function putAnchor(r, angle, anchor) {
     const key=anchorSlot(r,angle), list=leagueAnchors.get(key)||[];
     leagueAnchors.set(key,[...list.filter(a=>a.row!==r.sourceRow),{...anchor,row:r.sourceRow,clock:clockSeconds(r.timestamp)}].sort((a,b)=>a.row-b.row));
+    invalidateVideoSearchCache();
 }
 function leagueAngle(r,angle) {
     const list=leagueAnchors.get(anchorSlot(r,angle))||[];
@@ -1007,7 +1033,7 @@ function setupLeaguePanel(view) {
                 for(const {r,angle,anchor} of plan)putAnchor(r,angle,anchor);
                 resumeMatch=next||match.value;
                 await persistDraft();
-            }catch(e){leagueAnchors.clear();for(const [k,v] of before)leagueAnchors.set(k,v);dirty=oldDirty;resumeMatch=oldResume;say('一時保存失敗：'+e.message+'。入力は保持しています。',true);return;}
+            }catch(e){leagueAnchors.clear();invalidateVideoSearchCache();for(const [k,v] of before)leagueAnchors.set(k,v);dirty=oldDirty;resumeMatch=oldResume;say('一時保存失敗：'+e.message+'。入力は保持しています。',true);return;}
             finally{busy--;box.inert=false;updatePublishUI();}
             markDirty();const savedCount=count(),total=rows().length;
             if(next)match.value=next;
@@ -1026,7 +1052,7 @@ function setupLeaguePanel(view) {
     const time=field(advanced,'動画内の時刻（投球動作の2秒前）',document.createElement('input'));time.placeholder='1:23:45';
     function updatePitches(){const previous=pitch.value;const a=rows().filter(r=>r.inning===inning.value);pitch.replaceChildren(new Option('選択してください',''),...a.map((r,i)=>{const item=(leagueAnchors.get(anchorSlot(r,angle.value))||[]).find(x=>x.row===r.sourceRow);return new Option((i+1)+'球目｜'+r.timestamp.slice(-8)+'｜'+r.batter+'｜打席内'+r.pitchInAtBat+'球'+(item?item.missing?'【動画なし】':'【基準登録済】':''),String(r.sourceRow));}));if([...pitch.options].some(o=>o.value===previous))pitch.value=previous;}
     function updateInnings(){const previous=inning.value;inning.replaceChildren(new Option('選択してください',''),...[...new Set(rows().map(r=>r.inning).filter(Boolean))].map(i=>new Option(i,i)));if([...inning.options].some(o=>o.value===previous))inning.value=previous;updatePitches();}
-    function button(label,action){const b=document.createElement('button');b.type='button';b.textContent=label;b.className='search-button';b.style.cssText='margin:6px 0;font-size:12px;padding:8px;';b.addEventListener('click',async()=>{if(!ready||publishing||busy)return;if(edited){say('先に上の入力項目を一時保存してください。',true);return;}const before=new Map(leagueAnchors),oldDirty=dirty,oldResume=resumeMatch;busy++;box.inert=true;updatePublishUI();try{action();resumeMatch=match.value;await persistDraft();markDirty();search();populateInputs();say('途中補正を一時保存しました。下の「更新終了」で公開してください。');}catch(e){leagueAnchors.clear();for(const [k,v] of before)leagueAnchors.set(k,v);dirty=oldDirty;resumeMatch=oldResume;say(e.message,true);}finally{busy--;box.inert=false;updatePublishUI();}});advanced.append(b);}
+    function button(label,action){const b=document.createElement('button');b.type='button';b.textContent=label;b.className='search-button';b.style.cssText='margin:6px 0;font-size:12px;padding:8px;';b.addEventListener('click',async()=>{if(!ready||publishing||busy)return;if(edited){say('先に上の入力項目を一時保存してください。',true);return;}const before=new Map(leagueAnchors),oldDirty=dirty,oldResume=resumeMatch;busy++;box.inert=true;updatePublishUI();try{action();resumeMatch=match.value;await persistDraft();markDirty();search();populateInputs();say('途中補正を一時保存しました。下の「更新終了」で公開してください。');}catch(e){leagueAnchors.clear();invalidateVideoSearchCache();for(const [k,v] of before)leagueAnchors.set(k,v);dirty=oldDirty;resumeMatch=oldResume;say(e.message,true);}finally{busy--;box.inert=false;updatePublishUI();}});advanced.append(b);}
     const chosen=()=>{requireMatch();const r=rows().find(r=>r.inning===inning.value&&String(r.sourceRow)===pitch.value);if(!r)throw new Error('基準にする投球を選択してください。');return r;};
     inning.addEventListener('change',updatePitches);angle.addEventListener('change',updatePitches);
     button('この投球から再同期',()=>{const r=chosen(),v=parseYouTube({url:url.value||fields.get(angle.value).url.value,seconds:'0'}),start=parseTime(time.value);if(!v||start===null||clockSeconds(r.timestamp)===null)throw new Error('動画URL・動画内時刻・CSV時刻を確認してください。');putAnchor(r,angle.value,{id:v.id,start});});
@@ -1202,7 +1228,7 @@ function applySnapshot(snapshot){
         status.textContent=dataByCategory[category].length?`${dataByCategory[category].length.toLocaleString('ja-JP')}件 読み込み済み`:'未読み込み';
         status.style.color=dataByCategory[category].length?'#17633a':'#64748b';
     }
-    leagueAnchors.clear();for(const [key,list] of snapshot?.anchors||[])leagueAnchors.set(key,list);
+    leagueAnchors.clear();invalidateVideoSearchCache();for(const [key,list] of snapshot?.anchors||[])leagueAnchors.set(key,list);
     lastPublished=snapshot?.publishedAt||null;dirty=false;
     refreshLeaguePanel();populateFilters();search();
     linkBox.hidden=!cloudVersion;
